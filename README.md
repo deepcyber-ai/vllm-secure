@@ -1,8 +1,8 @@
 # vLLM Secure
 
-A Docker container that serves DeepSeek-R1-Distill-Qwen-32B as an OpenAI-compatible API with HTTPS reverse proxy, API key authentication, and automatic `<think>` tag stripping.
+A Docker container that serves LLMs as an OpenAI-compatible API with HTTPS reverse proxy, API key authentication, and automatic `<think>` tag stripping.
 
-Built for GPU cloud providers (RunPod, AWS, Azure, GCP) to provide a private attacker LLM for AI red teaming engagements.
+Built for GPU cloud providers (RunPod, AWS, Azure, GCP) and local workstations to provide a private attacker LLM for AI red teaming engagements.
 
 ## Architecture
 
@@ -33,16 +33,72 @@ Pre-built for `linux/amd64` with CUDA 12.4.1.
 
 ## Requirements
 
-- NVIDIA GPU with 40GB+ VRAM (e.g. A100 80GB, A6000 48GB, or 2x A6000)
+- NVIDIA GPU with 24GB+ VRAM (see [GPU Sizing](#gpu-sizing) for model-specific requirements)
 - NVIDIA Container Toolkit / GPU drivers on the host
 - 80GB+ disk for model storage (downloaded on first boot, cached for subsequent runs)
 
-## Environment Variables
+## Configuration
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `VLLM_API_KEY` | Yes | API key for authentication. Clients must send `Authorization: Bearer <key>` |
-| `HUGGING_FACE_HUB_TOKEN` | No | HuggingFace token if using gated models |
+All parameters are configurable via environment variables — no rebuild required.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MODEL` | `deepseek-ai/DeepSeek-R1-Distill-Qwen-32B` | HuggingFace model ID |
+| `MODEL_NAME` | `attacker` | Name exposed via `/v1/models` endpoint |
+| `GPU_MEMORY` | `0.95` | GPU memory utilisation (0.0–1.0) |
+| `MAX_MODEL_LEN` | `8192` | Maximum context window in tokens |
+| `TENSOR_PARALLEL` | `1` | Number of GPUs for tensor parallelism |
+| `QUANTIZATION` | *(empty)* | Quantization method: `awq`, `gptq`, `squeezellm` |
+| `VLLM_API_KEY` | *(empty)* | API key — clients must send `Authorization: Bearer <key>` |
+| `VLLM_EXTRA_ARGS` | *(empty)* | Any additional vLLM CLI flags |
+| `HUGGING_FACE_HUB_TOKEN` | *(empty)* | HuggingFace token for gated models |
+
+### Examples
+
+```bash
+# Defaults (DeepSeek-R1 32B, single GPU, FP16)
+docker run -d --gpus all \
+  -e VLLM_API_KEY=your-secret-key \
+  -p 8080:8080 -p 443:443 \
+  -v /data/models:/workspace/models \
+  deepcyberx/vllm-secure
+
+# Different model
+docker run -d --gpus all \
+  -e MODEL=meta-llama/Llama-3.1-70B-Instruct \
+  -e MODEL_NAME=llama70b \
+  -e VLLM_API_KEY=your-secret-key \
+  -p 8080:8080 \
+  -v /data/models:/workspace/models \
+  deepcyberx/vllm-secure
+
+# Dual GPU with quantization
+docker run -d --gpus all \
+  -e TENSOR_PARALLEL=2 \
+  -e QUANTIZATION=awq \
+  -e MAX_MODEL_LEN=16384 \
+  -e VLLM_API_KEY=your-secret-key \
+  -p 8080:8080 \
+  -v /data/models:/workspace/models \
+  deepcyberx/vllm-secure
+
+# Lower memory usage for smaller GPUs
+docker run -d --gpus all \
+  -e GPU_MEMORY=0.85 \
+  -e MAX_MODEL_LEN=4096 \
+  -e VLLM_API_KEY=your-secret-key \
+  -p 8080:8080 \
+  -v /data/models:/workspace/models \
+  deepcyberx/vllm-secure
+
+# Extra vLLM flags
+docker run -d --gpus all \
+  -e VLLM_EXTRA_ARGS="--enforce-eager --dtype float16" \
+  -e VLLM_API_KEY=your-secret-key \
+  -p 8080:8080 \
+  -v /data/models:/workspace/models \
+  deepcyberx/vllm-secure
+```
 
 ## Ports
 
@@ -50,6 +106,16 @@ Pre-built for `linux/amd64` with CUDA 12.4.1.
 |------|----------|---------|
 | 8080 | HTTP | For cloud proxy access (RunPod, load balancers). TLS is terminated upstream |
 | 443 | HTTPS | For direct IP access with self-signed certificate |
+
+## GPU Sizing
+
+| GPU Setup | VRAM | Recommended Config |
+|-----------|------|--------------------|
+| 1x RTX 4090 (24GB) | 24GB | `QUANTIZATION=awq MAX_MODEL_LEN=8192` (32B models) |
+| 2x RTX 4090 (24GB each) | 48GB | `TENSOR_PARALLEL=2` (32B FP16, or 70B AWQ) |
+| 1x A100 (80GB) | 80GB | Default settings (32B FP16 with headroom) |
+| 1x A6000 (48GB) | 48GB | Default settings (32B FP16) |
+| 2x RTX 5090 (32GB each) | 64GB | `TENSOR_PARALLEL=2` (70B AWQ or 32B FP16 with large context) |
 
 ## Deployment
 
@@ -95,6 +161,122 @@ docker run -d --gpus all \
 
 Use a node pool with `nvidia-tesla-a100` or `nvidia-l4` GPUs. Same `docker run` command as above.
 
+### Local Workstation
+
+For running on a local machine with NVIDIA GPU(s). This avoids cloud costs and keeps everything on your network.
+
+#### Prerequisites
+
+1. **NVIDIA drivers** installed (check with `nvidia-smi`)
+2. **Docker** with GPU support:
+   ```bash
+   # Ubuntu/Debian
+   sudo apt-get install docker.io nvidia-container-toolkit
+   sudo systemctl restart docker
+
+   # Verify GPU access
+   docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+   ```
+3. **Storage**: ~80GB free for model cache (first download only)
+
+#### Single RTX 4090 (24GB VRAM)
+
+Not enough VRAM for FP16, so use AWQ 4-bit quantization (~18GB):
+
+```bash
+# Create model cache directory
+mkdir -p /data/vllm-models
+
+# Run with AWQ quantization
+docker run -d --gpus all \
+  --name vllm-secure \
+  --restart unless-stopped \
+  -e MODEL=deepseek-ai/DeepSeek-R1-Distill-Qwen-32B \
+  -e QUANTIZATION=awq \
+  -e GPU_MEMORY=0.92 \
+  -e MAX_MODEL_LEN=8192 \
+  -e VLLM_API_KEY=your-secret-key \
+  -p 8080:8080 \
+  -p 443:443 \
+  -v /data/vllm-models:/workspace/models \
+  deepcyberx/vllm-secure
+```
+
+> **Note**: AWQ quantization requires an AWQ-quantized model variant. Use a pre-quantized model like `TheBloke/DeepSeek-R1-Distill-Qwen-32B-AWQ` or let vLLM download and quantize on the fly if supported.
+
+#### Dual RTX 4090 (48GB total VRAM)
+
+Full FP16 precision with tensor parallelism across both GPUs:
+
+```bash
+docker run -d --gpus all \
+  --name vllm-secure \
+  --restart unless-stopped \
+  -e MODEL=deepseek-ai/DeepSeek-R1-Distill-Qwen-32B \
+  -e TENSOR_PARALLEL=2 \
+  -e GPU_MEMORY=0.92 \
+  -e MAX_MODEL_LEN=8192 \
+  -e VLLM_API_KEY=your-secret-key \
+  -p 8080:8080 \
+  -p 443:443 \
+  -v /data/vllm-models:/workspace/models \
+  deepcyberx/vllm-secure
+```
+
+#### Remote Access via SSH Tunnel
+
+If your workstation is at home and you need to access it remotely (e.g. from a client site):
+
+```bash
+# From your laptop — tunnel local port 8080 to the workstation
+ssh -L 8080:localhost:8080 user@your-workstation-ip
+
+# Then use it locally as:
+curl http://localhost:8080/v1/models \
+  -H "Authorization: Bearer your-secret-key"
+```
+
+For persistent access, set up an SSH tunnel service or use a tool like [Tailscale](https://tailscale.com) for a private mesh VPN.
+
+#### Expose via Cloudflare Tunnel (Optional)
+
+If you need cloud tools (e.g. HumanBound) to reach your local server:
+
+```bash
+# Install cloudflared
+# https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+
+# Quick tunnel (ephemeral URL, no account needed)
+cloudflared tunnel --url http://localhost:8080
+# Gives you: https://xxxx.trycloudflare.com
+
+# Named tunnel (persistent, requires Cloudflare account)
+cloudflared tunnel create vllm-secure
+cloudflared tunnel route dns vllm-secure llm.yourdomain.com
+cloudflared tunnel run vllm-secure
+```
+
+#### Management Commands
+
+```bash
+# View startup logs (wait for "Started server process" message)
+docker logs -f vllm-secure
+
+# Check GPU usage
+nvidia-smi
+
+# Stop
+docker stop vllm-secure
+
+# Start again (uses cached model)
+docker start vllm-secure
+
+# Update to latest image
+docker pull deepcyberx/vllm-secure
+docker stop vllm-secure && docker rm vllm-secure
+# Then re-run the docker run command above
+```
+
 ## Usage
 
 ### Authentication
@@ -104,14 +286,14 @@ All requests require the `Authorization: Bearer <VLLM_API_KEY>` header.
 ### List Models
 
 ```bash
-curl https://<host>:8080/v1/models \
+curl http://<host>:8080/v1/models \
   -H "Authorization: Bearer your-secret-key"
 ```
 
 ### Chat Completion
 
 ```bash
-curl https://<host>:8080/v1/chat/completions \
+curl http://<host>:8080/v1/chat/completions \
   -H "Authorization: Bearer your-secret-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -123,7 +305,7 @@ curl https://<host>:8080/v1/chat/completions \
 ### Health Check (filter proxy)
 
 ```bash
-curl https://<host>:8080/health \
+curl http://<host>:8080/health \
   -H "Authorization: Bearer your-secret-key"
 ```
 
@@ -135,20 +317,10 @@ The API is fully OpenAI-compatible. Configure any tool that supports custom Open
 
 ```
 OPENAI_API_KEY=your-secret-key
-OPENAI_API_BASE=https://<host>:8080/v1
+OPENAI_API_BASE=http://<host>:8080/v1
 ```
 
-The model is served as `attacker`.
-
-## Model Details
-
-| Property | Value |
-|----------|-------|
-| Model | deepseek-ai/DeepSeek-R1-Distill-Qwen-32B |
-| Served Name | `attacker` |
-| Max Context | 8192 tokens |
-| GPU Memory | 95% utilisation |
-| Parameters | 32B |
+The model is served as `attacker` by default (configurable via `MODEL_NAME`).
 
 ## First Boot
 
@@ -179,20 +351,6 @@ vllm-secure/
 ```
 
 ## Customisation
-
-### Change the model
-
-Edit `start.sh` and replace the `--model` flag:
-
-```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model your-org/your-model \
-  --host 127.0.0.1 \
-  --port 8000 \
-  --served-model-name attacker \
-  --gpu-memory-utilization 0.95 \
-  --max-model-len 8192 &
-```
 
 ### Disable think-tag filtering
 
