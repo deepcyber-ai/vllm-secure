@@ -20,7 +20,9 @@ vLLM (port 8000) — serves the model as an OpenAI-compatible API
 ```
 
 - **nginx** handles external access (TLS termination for direct IP, plain HTTP for cloud proxy)
-- **filter_proxy** intercepts `/v1/chat/completions` responses and removes chain-of-thought `<think>` blocks that DeepSeek-R1 generates, which would otherwise corrupt JSON parsing in downstream tools
+- **filter_proxy** intercepts `/v1/chat/completions` responses and:
+  1. Removes chain-of-thought `<think>` blocks that DeepSeek-R1 generates
+  2. Extracts the first valid JSON object when the model produces trailing garbage (repeated metadata fields, duplicate JSON objects) — fixes scoring failures in PyRIT, Promptfoo, and other tools that expect clean JSON
 - **vLLM** serves the model with native `Authorization: Bearer` authentication via the `VLLM_API_KEY` environment variable
 
 ## Container Image
@@ -309,7 +311,7 @@ curl http://<host>:8080/health \
   -H "Authorization: Bearer your-secret-key"
 ```
 
-Returns: `{"status": "ok", "filter": "think-tag-strip"}`
+Returns: `{"status": "ok", "filter": "think-tag-strip,json-extract"}`
 
 ## Using with OpenAI-Compatible Tools
 
@@ -348,6 +350,28 @@ vllm-secure/
   start.sh            — Entrypoint: starts vLLM, filter proxy, nginx
   test_strip_think.py — Unit tests for the think-tag filter
   README.md           — This file
+```
+
+## Filter Details
+
+### Think-tag stripping
+
+DeepSeek-R1 models wrap chain-of-thought reasoning in `<think>...</think>` tags. These appear before the actual response and corrupt downstream parsing. The proxy strips them from both non-streaming and streaming responses.
+
+### JSON extraction
+
+DeepSeek-R1 often generates a valid JSON object (e.g. for scoring) but then continues generating trailing content — repeated `"metadata"` fields, duplicate JSON objects, or restated answers. This breaks tools like PyRIT's `SelfAskTrueFalseScorer` that expect a single clean JSON response.
+
+The proxy detects responses starting with `{`, tracks brace depth to find the end of the first complete JSON object, validates it, and discards everything after it. Plain text responses pass through unchanged.
+
+Example — before:
+```json
+{"score_value": "True", "description": "advice given", "rationale": "recommended fund"}, "metadata": "done", "metadata": "complete", "metadata": "final"
+```
+
+After:
+```json
+{"score_value": "True", "description": "advice given", "rationale": "recommended fund"}
 ```
 
 ## Customisation
