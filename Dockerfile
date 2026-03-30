@@ -33,6 +33,6 @@ ENV TRANSFORMERS_CACHE=/workspace/models
 
 WORKDIR /workspace
 
-EXPOSE 443 8080
+EXPOSE 443 8000 8080
 
 CMD ["/start.sh"]
